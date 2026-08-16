@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "otpguard"
+version = "0.1.0"
+description = "Passwordless one-time codes done safely: resend cooldown, attempt counting, lockout and pluggable delivery channels."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Shipmind Labs", email = "hello@shipmindlabs.com" }]
+keywords = ["otp", "one-time-password", "authentication", "passwordless", "security"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Security",
+  "Typing :: Typed",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/shipmindlabs/otpguard"
+Source = "https://github.com/shipmindlabs/otpguard"
+Issues = "https://github.com/shipmindlabs/otpguard/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/otpguard"]
