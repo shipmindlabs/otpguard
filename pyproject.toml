@@ -31,3 +31,7 @@ Issues = "https://github.com/shipmindlabs/otpguard/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/otpguard"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
