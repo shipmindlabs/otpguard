@@ -51,6 +51,32 @@ stored = hash_code(code, pepper=SERVER_SECRET)
 verify_code(candidate, stored, pepper=SERVER_SECRET)
 ```
 
+### Resend cooldown
+
+A second code cannot be requested before the cooldown elapses, and the caller
+learns exactly how long is left. The cooldown holds no state itself: store the
+moment of the last delivery next to the pending code and pass it back.
+
+```python
+from datetime import datetime, timedelta, timezone
+from otpguard import ResendCooldown, ResendTooSoon
+
+cooldown = ResendCooldown(timedelta(seconds=60))
+
+try:
+    cooldown.check(last_sent_at)        # None on the first request
+except ResendTooSoon as exc:
+    exc.retry_after                     # timedelta(seconds=43)
+    exc.retry_after_seconds             # 43.0, ready for a Retry-After header
+else:
+    send(generate_code())
+    last_sent_at = datetime.now(timezone.utc)
+```
+
+`retry_after()` returns the same remaining time without raising, `allows()`
+answers with a bool, and `next_allowed_at()` gives the absolute moment the next
+code may go out. Timestamps must be timezone-aware; any offset works.
+
 ## Development
 
 ```bash

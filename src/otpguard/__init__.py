@@ -13,9 +13,11 @@ from otpguard.codes import (
     hash_code,
     verify_code,
 )
+from otpguard.cooldown import DEFAULT_COOLDOWN, ResendCooldown, ResendTooSoon
 
 __all__ = [
     "ALGORITHM",
+    "DEFAULT_COOLDOWN",
     "DEFAULT_POLICY",
     "DEFAULT_SEPARATORS",
     "DIGITS",
@@ -23,6 +25,8 @@ __all__ = [
     "UPPERCASE_UNAMBIGUOUS",
     "CodePolicy",
     "HashedCode",
+    "ResendCooldown",
+    "ResendTooSoon",
     "__version__",
     "generate_code",
     "hash_code",
