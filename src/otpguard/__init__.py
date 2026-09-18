@@ -14,17 +14,29 @@ from otpguard.codes import (
     verify_code,
 )
 from otpguard.cooldown import DEFAULT_COOLDOWN, ResendCooldown, ResendTooSoon
+from otpguard.lockout import (
+    DEFAULT_LOCKOUT,
+    DEFAULT_MAX_ATTEMPTS,
+    AttemptRecord,
+    LockedOut,
+    LockoutPolicy,
+)
 
 __all__ = [
     "ALGORITHM",
     "DEFAULT_COOLDOWN",
+    "DEFAULT_LOCKOUT",
+    "DEFAULT_MAX_ATTEMPTS",
     "DEFAULT_POLICY",
     "DEFAULT_SEPARATORS",
     "DIGITS",
     "SALT_BYTES",
     "UPPERCASE_UNAMBIGUOUS",
+    "AttemptRecord",
     "CodePolicy",
     "HashedCode",
+    "LockedOut",
+    "LockoutPolicy",
     "ResendCooldown",
     "ResendTooSoon",
     "__version__",

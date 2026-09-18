@@ -77,6 +77,39 @@ else:
 answers with a bool, and `next_allowed_at()` gives the absolute moment the next
 code may go out. Timestamps must be timezone-aware; any offset works.
 
+### Attempt counting and lockout
+
+Wrong codes are counted per identifier: after `max_attempts` of them the
+identifier is locked for `duration`. The whole state of a lockout is a small
+`AttemptRecord` you persist alongside the pending code, so a redeploy does not
+hand an attacker a fresh set of attempts.
+
+```python
+from datetime import timedelta
+from otpguard import AttemptRecord, LockedOut, LockoutPolicy
+
+lockout = LockoutPolicy(max_attempts=5, duration=timedelta(minutes=15))
+record = AttemptRecord.decode(stored_record) if stored_record else None
+
+try:
+    lockout.check(record)
+except LockedOut as exc:
+    exc.retry_after_seconds             # 812.4
+else:
+    if verify_code(candidate, stored):
+        record = lockout.register_success()
+    else:
+        record = lockout.register_failure(record)
+        lockout.remaining_attempts(record)   # 2
+
+stored_record = record.encode()         # '{"failures":3}'
+```
+
+The encoded record is ASCII JSON and fits in a single column. Once the lock
+expires the tally starts over, and attempts made while the identifier is locked
+leave the record untouched, so hammering the endpoint cannot stretch the wait.
+Methods accept either an `AttemptRecord` or its encoded form.
+
 ## Development
 
 ```bash
