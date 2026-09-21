@@ -11,6 +11,7 @@ Early development. The public API is not stable yet.
 
 ```bash
 pip install otpguard
+pip install "otpguard[redis]"   # for the redis adapter
 ```
 
 ## Usage
@@ -109,6 +110,38 @@ The encoded record is ASCII JSON and fits in a single column. Once the lock
 expires the tally starts over, and attempts made while the identifier is locked
 leave the record untouched, so hammering the endpoint cannot stretch the wait.
 Methods accept either an `AttemptRecord` or its encoded form.
+
+### Storage
+
+Everything above is deliberately stateless, so the pending digest, the moment
+of the last delivery and the attempt tally have to live somewhere. `Storage` is
+the contract that somewhere has to meet: `get`, `set`, `incr` and `delete`,
+with a lifetime attached to the key.
+
+```python
+from datetime import timedelta
+from otpguard import MemoryStorage
+
+store = MemoryStorage()
+store.set("code:alice", stored, timedelta(minutes=5))
+store.get("code:alice")                            # the digest, until it expires
+store.incr("fails:alice", timedelta(minutes=15))   # 1, then 2, then 3...
+```
+
+`MemoryStorage` lives in the process and suits tests and a single worker. Once
+there is more than one, hand the redis adapter a client; keys are prefixed so
+the database can be shared with the rest of the application.
+
+```python
+import redis
+from otpguard import RedisStorage
+
+store = RedisStorage(redis.Redis(), prefix="otpguard:")
+```
+
+`incr` attaches the lifetime only when the counter is created, so a burst of
+wrong codes cannot push the window further out. Any object with the four
+methods will do; `isinstance(store, Storage)` answers whether it has them.
 
 ## Development
 

@@ -24,6 +24,9 @@ classifiers = [
 ]
 dependencies = []
 
+[project.optional-dependencies]
+redis = ["redis>=4.2"]
+
 [project.urls]
 Homepage = "https://github.com/shipmindlabs/otpguard"
 Source = "https://github.com/shipmindlabs/otpguard"

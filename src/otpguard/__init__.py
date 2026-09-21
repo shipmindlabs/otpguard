@@ -21,6 +21,12 @@ from otpguard.lockout import (
     LockedOut,
     LockoutPolicy,
 )
+from otpguard.storage import (
+    DEFAULT_PREFIX,
+    MemoryStorage,
+    RedisStorage,
+    Storage,
+)
 
 __all__ = [
     "ALGORITHM",
@@ -28,6 +34,7 @@ __all__ = [
     "DEFAULT_LOCKOUT",
     "DEFAULT_MAX_ATTEMPTS",
     "DEFAULT_POLICY",
+    "DEFAULT_PREFIX",
     "DEFAULT_SEPARATORS",
     "DIGITS",
     "SALT_BYTES",
@@ -37,8 +44,11 @@ __all__ = [
     "HashedCode",
     "LockedOut",
     "LockoutPolicy",
+    "MemoryStorage",
+    "RedisStorage",
     "ResendCooldown",
     "ResendTooSoon",
+    "Storage",
     "__version__",
     "generate_code",
     "hash_code",
