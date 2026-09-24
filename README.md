@@ -143,6 +143,51 @@ store = RedisStorage(redis.Redis(), prefix="otpguard:")
 wrong codes cannot push the window further out. Any object with the four
 methods will do; `isinstance(store, Storage)` answers whether it has them.
 
+### Delivery channels
+
+A code is only worth generating if it reaches its destination. `Sender` is the
+whole contract for that: one `send` that takes a `Message` and raises
+`DeliveryError` when the channel will not carry it.
+
+```python
+from otpguard import DeliveryError, Message, Sender
+
+class SmsSender:
+    def __init__(self, client):
+        self._client = client
+
+    def send(self, message: Message) -> None:
+        try:
+            self._client.send_sms(message.destination, message.body)
+        except TimeoutError as exc:
+            raise DeliveryError(str(exc)) from exc
+```
+
+`StubSender` stands in while there is no channel yet: it keeps messages in the
+process, so a test or a local run can read the code back.
+
+```python
+from otpguard import Message, StubSender
+
+sender = StubSender()
+sender.send(Message("+15551234567", code))
+sender.last.body                        # '482913 is your verification code.'
+```
+
+A stub that reaches a deployment accepts every code and delivers none, so it
+says so: each message is logged at WARNING, and the place where the application
+picks its channel can refuse one outright.
+
+```python
+from otpguard import require_real_sender
+
+sender = require_real_sender(build_sender(settings))   # raises on a stub
+```
+
+The message body comes from a template, `'{code} is your verification code.'`
+unless you pass another one, and `Message` keeps the code out of its own repr,
+so a log line or a traceback carrying a live message does not hand it out.
+
 ## Development
 
 ```bash

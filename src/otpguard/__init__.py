@@ -1,5 +1,14 @@
 """Passwordless one-time codes with cooldown, attempt limits and lockout."""
 
+from otpguard.channels import (
+    DEFAULT_TEMPLATE,
+    DeliveryError,
+    Message,
+    Sender,
+    StubSender,
+    StubSenderInProduction,
+    require_real_sender,
+)
 from otpguard.codes import (
     ALGORITHM,
     DEFAULT_POLICY,
@@ -36,22 +45,29 @@ __all__ = [
     "DEFAULT_POLICY",
     "DEFAULT_PREFIX",
     "DEFAULT_SEPARATORS",
+    "DEFAULT_TEMPLATE",
     "DIGITS",
     "SALT_BYTES",
     "UPPERCASE_UNAMBIGUOUS",
     "AttemptRecord",
     "CodePolicy",
+    "DeliveryError",
     "HashedCode",
     "LockedOut",
     "LockoutPolicy",
     "MemoryStorage",
+    "Message",
     "RedisStorage",
     "ResendCooldown",
     "ResendTooSoon",
+    "Sender",
     "Storage",
+    "StubSender",
+    "StubSenderInProduction",
     "__version__",
     "generate_code",
     "hash_code",
+    "require_real_sender",
     "verify_code",
 ]
 
