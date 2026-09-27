@@ -188,6 +188,49 @@ The message body comes from a template, `'{code} is your verification code.'`
 unless you pass another one, and `Message` keeps the code out of its own repr,
 so a log line or a traceback carrying a live message does not hand it out.
 
+### Test mode
+
+A universal code that opens every account is the last thing a one-time code
+library should carry by default, so `TestMode` is off unless it is asked for,
+and asking takes both a code and the moment it stops working.
+
+```python
+from datetime import timedelta
+from otpguard import TestMode
+
+mode = TestMode()                                    # off
+mode = TestMode("000111", ttl=timedelta(hours=1))    # on, and already expiring
+```
+
+There is no way to switch it on without saying when it goes off: `ttl` is
+required next to the code, must be positive and cannot exceed
+`MAX_TEST_MODE_TTL`, which is one day. Switching it on logs at CRITICAL, every
+accepted universal code logs at ERROR, and a code offered after it expired is
+refused and logged at WARNING.
+
+Verification goes through the mode, which tries the stored digest first and the
+universal code only after it fails, so test mode cannot shadow a real code:
+
+```python
+mode.verify(candidate, stored)          # the stored digest, then the test code
+mode.accepts(candidate)                 # the test code alone
+```
+
+Configuration usually arrives from the environment, where a deployment that
+calls itself production refuses the code outright, and the place that wires the
+application together can refuse one however it was configured:
+
+```python
+from otpguard import require_no_test_mode
+
+mode = TestMode.from_env()   # OTPGUARD_TEST_MODE_CODE + OTPGUARD_TEST_MODE_TTL
+require_no_test_mode(mode)   # raises while a universal code exists at all
+```
+
+The expiry is a safety net for a code someone forgot, not a licence to ship
+one: `require_no_test_mode` refuses a configured mode whether or not it has
+already run out.
+
 ## Development
 
 ```bash

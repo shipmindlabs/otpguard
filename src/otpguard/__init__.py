@@ -36,6 +36,16 @@ from otpguard.storage import (
     RedisStorage,
     Storage,
 )
+from otpguard.testmode import (
+    ENVIRONMENT_VAR,
+    MAX_TEST_MODE_TTL,
+    PRODUCTION_ENVIRONMENTS,
+    TEST_MODE_CODE_VAR,
+    TEST_MODE_TTL_VAR,
+    TestMode,
+    TestModeInProduction,
+    require_no_test_mode,
+)
 
 __all__ = [
     "ALGORITHM",
@@ -47,7 +57,12 @@ __all__ = [
     "DEFAULT_SEPARATORS",
     "DEFAULT_TEMPLATE",
     "DIGITS",
+    "ENVIRONMENT_VAR",
+    "MAX_TEST_MODE_TTL",
+    "PRODUCTION_ENVIRONMENTS",
     "SALT_BYTES",
+    "TEST_MODE_CODE_VAR",
+    "TEST_MODE_TTL_VAR",
     "UPPERCASE_UNAMBIGUOUS",
     "AttemptRecord",
     "CodePolicy",
@@ -64,9 +79,12 @@ __all__ = [
     "Storage",
     "StubSender",
     "StubSenderInProduction",
+    "TestMode",
+    "TestModeInProduction",
     "__version__",
     "generate_code",
     "hash_code",
+    "require_no_test_mode",
     "require_real_sender",
     "verify_code",
 ]
