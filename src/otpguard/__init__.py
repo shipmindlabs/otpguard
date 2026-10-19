@@ -23,6 +23,7 @@ from otpguard.codes import (
     verify_code,
 )
 from otpguard.cooldown import DEFAULT_COOLDOWN, ResendCooldown, ResendTooSoon
+from otpguard.flow import OtpFlow, RequestedCode
 from otpguard.lockout import (
     DEFAULT_LOCKOUT,
     DEFAULT_MAX_ATTEMPTS,
@@ -72,7 +73,9 @@ __all__ = [
     "LockoutPolicy",
     "MemoryStorage",
     "Message",
+    "OtpFlow",
     "RedisStorage",
+    "RequestedCode",
     "ResendCooldown",
     "ResendTooSoon",
     "Sender",
