@@ -6,8 +6,8 @@ lockout and pluggable delivery channels.
 A one-time code is easy to generate and easy to get wrong. otpguard carries the
 parts that are usually left to the application: a code drawn from the system
 CSPRNG and stored only as a salted digest, a resend cooldown, an attempt tally
-that survives a restart, a delivery contract, and a test mode that cannot be
-left switched on quietly.
+that survives a restart, a delivery contract, a test mode that cannot be left
+switched on quietly, and a flow object that holds them together.
 
 ## Status
 
@@ -28,58 +28,101 @@ Two entry points: one asks for a code, the other spends it. Every piece of state
 lives in a `Storage`, so nothing below keeps state in the process.
 
 ```python
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 from otpguard import (
     LockoutPolicy,
     MemoryStorage,
-    Message,
+    OtpFlow,
     ResendCooldown,
     StubSender,
-    generate_code,
-    hash_code,
-    verify_code,
 )
 
-CODE_TTL = timedelta(minutes=5)
+flow = OtpFlow(
+    MemoryStorage(),
+    StubSender(),                  # a real channel goes here in a deployment
+    code_ttl=timedelta(minutes=5),
+    cooldown=ResendCooldown(timedelta(seconds=60)),
+    lockout=LockoutPolicy(max_attempts=5, duration=timedelta(minutes=15)),
+)
 
-store = MemoryStorage()
-cooldown = ResendCooldown(timedelta(seconds=60))
-lockout = LockoutPolicy(max_attempts=5, duration=timedelta(minutes=15))
-sender = StubSender()          # a real channel goes here in a deployment
+issued = flow.request("alice", "+15551234567")   # drawn, stored, delivered
+issued.resend_allowed_at                          # when another one may be asked for
 
-
-def request_code(identifier: str, destination: str) -> None:
-    last_sent = store.get(f"sent:{identifier}")
-    cooldown.check(datetime.fromisoformat(last_sent) if last_sent else None)
-
-    code = generate_code()
-    store.set(f"code:{identifier}", hash_code(code).encode(), CODE_TTL)
-    store.set(f"sent:{identifier}", datetime.now(timezone.utc).isoformat(), CODE_TTL)
-    sender.send(Message(destination, code))
-
-
-def submit_code(identifier: str, candidate: str) -> bool:
-    lockout.check(store.get(f"fails:{identifier}"))
-
-    stored = store.get(f"code:{identifier}")
-    if stored is not None and verify_code(candidate, stored):
-        store.delete(f"code:{identifier}")        # one code, one success
-        store.delete(f"fails:{identifier}")
-        return True
-
-    record = lockout.register_failure(store.get(f"fails:{identifier}"))
-    store.set(f"fails:{identifier}", record.encode(), lockout.duration + CODE_TTL)
-    return False
+flow.verify("alice", "482913")                    # True once, False afterwards
 ```
 
-`cooldown.check` raises `ResendTooSoon` and `lockout.check` raises `LockedOut`;
-both carry `retry_after_seconds`, ready for a `Retry-After` header. Removing the
-pending digest on success is what makes a code single-use. `tests/test_flow.py`
-runs the same flow on an injected clock and uses `Storage.incr` to make that one
-step atomic, so two requests arriving together cannot both spend a code.
+`flow.request` raises `ResendTooSoon` while the cooldown is running and
+`flow.verify` raises `LockedOut` while the identifier is locked; both exceptions
+carry `retry_after_seconds`, ready for a `Retry-After` header. Every piece the
+flow composes also works on its own, and the sections below take them one at a
+time.
 
 ## The pieces
+
+### The flow
+
+`OtpFlow` is the two entry points with the rules already wired: `request` draws a
+code, stores its digest and hands it to the channel; `verify` spends the pending
+code or charges the attempt to the tally. The flow keeps nothing in the process —
+the pending digest, the resend gate, the moment of the last delivery, the spend
+claim and the attempt tally are five keys in the store, so any number of workers
+can share one flow.
+
+```python
+from otpguard import LockedOut, ResendTooSoon
+
+try:
+    issued = flow.request("alice", "+15551234567")
+except ResendTooSoon as exc:
+    exc.retry_after_seconds          # 43.0
+else:
+    issued.code                      # the clear-text code, already delivered
+    issued.expires_at                # the moment the digest runs out
+    issued.resend_allowed_at         # the moment another code may go out
+
+try:
+    flow.verify("alice", candidate)  # True, or False with an attempt spent
+except LockedOut as exc:
+    exc.retry_after_seconds          # 812.4
+
+flow.remaining_attempts("alice")     # 4
+```
+
+The keys are per identifier, and that is the whole state of a flow:
+
+| Key | Holds |
+| --- | --- |
+| `code:<id>` | the salted digest of the pending code, for `code_ttl` |
+| `sent:<id>` | the moment of the last delivery, for the cooldown interval |
+| `gate:<id>` | the resend claim: the counter whose creation owns the send |
+| `used:<id>` | the spend claim, so one code can succeed only once |
+| `fails:<id>` | the encoded `AttemptRecord` |
+
+The parts worth knowing about:
+
+- **The resend gate is a counter, not a timestamp.** `request` calls
+  `Storage.incr` with the cooldown as the lifetime, so whoever creates the
+  counter owns the send and two requests arriving together still cost one
+  message.
+- **A refused delivery costs nothing.** A `DeliveryError` from the channel
+  releases the gate and reaches the caller, so the cooldown has not started and
+  the next request may try again.
+- **A resend replaces the digest, not the tally.** The old code stops working and
+  `fails:` is left alone, so the resend endpoint is not an attempt-counter reset.
+- **A missing digest is a failure.** An expired or already spent code is a wrong
+  code rather than an error; the only submission that costs no attempt is a
+  repeat of a success.
+- **Success spends the code atomically.** The spend claim is incremented before
+  the digest is removed, so of several correct submissions arriving together
+  exactly one is told it won.
+- **The code stays out of logs.** `RequestedCode.__repr__` masks it, as
+  `Message` and `TestMode` do.
+
+Every method takes an optional `now` for testing and requires timezone-aware
+datetimes. `policy`, `pepper` and `template` are handed down to code generation,
+hashing and the message; `test_mode` is consulted on verification, after the
+stored digest.
 
 ### Codes
 
@@ -318,7 +361,8 @@ makes it safe is a short life and a hard cap on guesses.
 
 With the default policy and `max_attempts=5`, one code window gives an attacker
 about a 1-in-200,000 chance. That arithmetic only holds if every one of these is
-true:
+true. `OtpFlow` does all five; the list is what to hold on to if you wire the
+pieces together yourself:
 
 - **The tally is persisted.** `AttemptRecord.encode()` goes into storage next to
   the pending code. A tally held in memory is a tally an attacker resets by
@@ -347,9 +391,9 @@ it against ranges that pay the attacker a share of the fee.
   messages per identifier per day. Add an absolute cap:
   `store.incr(f"sent:day:{identifier}", timedelta(days=1))` and refuse above a
   threshold you are willing to pay for.
-- **Check before you send.** `cooldown.check` belongs ahead of `sender.send`, so
-  a refused request costs nothing. Generating the code first is free; sending it
-  is not.
+- **Check before you send.** The cooldown gate is claimed ahead of `sender.send`,
+  so a refused request costs nothing. Generating the code first is free; sending
+  it is not.
 - **Cap by destination, not only by identifier.** Counters keyed by country code
   or number prefix catch a flood spread over fresh identifiers, which a
   per-identifier cooldown never sees.
@@ -361,16 +405,29 @@ it against ranges that pay the attacker a share of the fee.
 
 ### Codes in logs and stores
 
-The clear-text code lives for one function call. `Message.__repr__` and
-`TestMode.__repr__` mask it so a traceback or a log line does not hand it out,
-and nothing in the library logs a code or a universal code. Keep your own logging
-to the same rule, and if you use a pepper, keep it out of the database whose
-leak it is meant to survive.
+The clear-text code lives for one function call. `RequestedCode.__repr__`,
+`Message.__repr__` and `TestMode.__repr__` mask it so a traceback or a log line
+does not hand it out, and nothing in the library logs a code or a universal code.
+Keep your own logging to the same rule, and if you use a pepper, keep it out of
+the database whose leak it is meant to survive.
 
 ## Configuration reference
 
 No global configuration and no settings file: everything is an argument with a
 default.
+
+### Flow
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `OtpFlow(store, sender)` | required | Any `Storage` and any `Sender` |
+| `OtpFlow(code_ttl=)` | required | Lifetime of the pending digest; never defaulted |
+| `OtpFlow(cooldown=)` | `ResendCooldown()` | Also the lifetime of the resend gate |
+| `OtpFlow(lockout=)` | `LockoutPolicy()` | Attempt cap and how long a lock lasts |
+| `OtpFlow(policy=)` | `DEFAULT_POLICY` | Shape of the code and input normalization |
+| `OtpFlow(test_mode=)` | off, using `policy` | Consulted after the stored digest |
+| `OtpFlow(pepper=)` | `b""` | Mixed into every digest the flow writes and reads |
+| `OtpFlow(template=)` | `DEFAULT_TEMPLATE` | Body of every message the flow sends |
 
 ### Codes
 
