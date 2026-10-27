@@ -17,34 +17,50 @@ class Clock:
 
 
 class FakeRedis:
-    """The handful of commands the adapter is allowed to use."""
+    """The handful of commands the adapter is allowed to use.
 
-    def __init__(self) -> None:
+    Every command is recorded in order, and ``fail_after`` makes the connection
+    drop once that many commands have been accepted, so a half-finished
+    sequence can be inspected.
+    """
+
+    def __init__(self, *, fail_after: int | None = None) -> None:
         self.values: dict[str, str] = {}
         self.expiries: dict[str, int] = {}
+        self.commands: list[str] = []
+        self._fail_after = fail_after
 
     def get(self, name):
+        self._record("get")
         value = self.values.get(name)
         return None if value is None else value.encode("utf-8")
 
-    def set(self, name, value, px=None):
+    def set(self, name, value, px=None, nx=False):
+        self._record("set")
+        if nx and name in self.values:
+            return None
         self.values[name] = value
         if px is None:
             self.expiries.pop(name, None)
         else:
             self.expiries[name] = px
+        return True
 
     def incr(self, name):
+        self._record("incr")
         counter = int(self.values.get(name, 0)) + 1
         self.values[name] = str(counter)
         return counter
 
-    def pexpire(self, name, px):
-        self.expiries[name] = px
-
     def delete(self, name):
+        self._record("delete")
         self.values.pop(name, None)
         self.expiries.pop(name, None)
+
+    def _record(self, command: str) -> None:
+        self.commands.append(command)
+        if self._fail_after is not None and len(self.commands) > self._fail_after:
+            raise ConnectionError("the connection dropped")
 
 
 @pytest.fixture
@@ -175,6 +191,31 @@ def test_redis_lifetimes_are_passed_in_milliseconds(client):
     assert DEFAULT_PREFIX + "code:bob" not in client.expiries
 
 
+def test_redis_attaches_the_lifetime_before_the_counter_exists(client):
+    store = RedisStorage(client)
+    assert store.incr("fails:alice", timedelta(seconds=60)) == 1
+    assert client.commands == ["set", "incr"]
+    assert client.expiries[DEFAULT_PREFIX + "fails:alice"] == 60_000
+
+
+def test_redis_counts_without_a_lifetime_in_one_command(client):
+    store = RedisStorage(client)
+    assert store.incr("fails:alice") == 1
+    assert client.commands == ["incr"]
+    assert DEFAULT_PREFIX + "fails:alice" not in client.expiries
+
+
+def test_a_counter_left_half_created_still_expires():
+    client = FakeRedis(fail_after=1)
+    store = RedisStorage(client)
+    with pytest.raises(ConnectionError):
+        store.incr("fails:alice", timedelta(seconds=60))
+    key = DEFAULT_PREFIX + "fails:alice"
+    assert client.commands == ["set", "incr"]
+    assert client.values[key] == "0"
+    assert client.expiries[key] == 60_000
+
+
 def test_redis_expires_a_counter_only_when_it_is_created(client):
     store = RedisStorage(client)
     assert store.incr("fails:alice", timedelta(seconds=60)) == 1
@@ -198,3 +239,6 @@ def test_redis_rejects_a_non_positive_lifetime(client, ttl):
     store = RedisStorage(client)
     with pytest.raises(ValueError):
         store.set("code:alice", "digest", ttl)
+    with pytest.raises(ValueError):
+        store.incr("fails:alice", ttl)
+    assert client.commands == []

@@ -139,13 +139,14 @@ class RedisStorage:
 
     def incr(self, key: str, ttl: timedelta | None = None) -> int:
         full = self._key(key)
-        counter = int(self._client.incr(full))
         millis = _millis(ttl)
-        # Expiring only the freshly created counter keeps the window anchored to
-        # the first attempt; re-expiring would let a burst of tries extend it.
-        if millis is not None and counter == 1:
-            self._client.pexpire(full, millis)
-        return counter
+        # The lifetime is attached before the counter exists: incrementing first
+        # would leave an immortal key behind if the expiry never followed, and
+        # SET NX only lands for the creator, so the window stays anchored to the
+        # first increment instead of moving with every later one.
+        if millis is not None:
+            self._client.set(full, "0", nx=True, px=millis)
+        return int(self._client.incr(full))
 
     def delete(self, key: str) -> None:
         self._client.delete(self._key(key))
