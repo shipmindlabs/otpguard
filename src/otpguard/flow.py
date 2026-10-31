@@ -144,10 +144,13 @@ class OtpFlow:
             return True
         if stored is None and self.store.get(used) is not None:
             return False
+        failed = self.lockout.register_failure(record, moment)
+        # The record outlives the lock it carries: one that expired with its own
+        # lock would take the locks it counted with it.
         self.store.set(
             fails,
-            self.lockout.register_failure(record, moment).encode(),
-            self.lockout.duration + self.code_ttl,
+            failed.encode(),
+            self.lockout.lock_duration(failed, moment) + self.code_ttl,
         )
         return False
 

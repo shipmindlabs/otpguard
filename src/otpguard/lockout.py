@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -39,20 +40,28 @@ class AttemptRecord:
     """Wrong-code tally for a single identifier.
 
     The record is the entire state of a lockout: persist :meth:`encode` next to
-    the pending code and the lock outlives the process that created it.
+    the pending code and the lock outlives the process that created it. Once a
+    lock expires the failures restart at zero while ``locks`` keeps counting the
+    locks served, so a policy with an escalation factor can make the next one
+    last longer.
     """
 
     failures: int = 0
     locked_until: datetime | None = None
+    locks: int = 0
 
     def __post_init__(self) -> None:
         if self.failures < 0:
             raise ValueError("failures must not be negative")
+        if self.locks < 0:
+            raise ValueError("locks must not be negative")
         if self.locked_until is not None:
             _require_aware(self.locked_until, "locked_until")
 
     def encode(self) -> str:
         payload: dict[str, object] = {"failures": self.failures}
+        if self.locks:
+            payload["locks"] = self.locks
         if self.locked_until is not None:
             payload["locked_until"] = self.locked_until.isoformat()
         return json.dumps(payload, separators=(",", ":"))
@@ -65,9 +74,6 @@ class AttemptRecord:
             raise ValueError("malformed attempt record") from exc
         if not isinstance(payload, dict):
             raise ValueError("malformed attempt record")
-        failures = payload.get("failures", 0)
-        if not isinstance(failures, int) or isinstance(failures, bool):
-            raise ValueError("malformed attempt record")
         raw = payload.get("locked_until")
         if raw is None:
             locked_until = None
@@ -78,7 +84,11 @@ class AttemptRecord:
                 raise ValueError("malformed attempt record") from exc
         else:
             raise ValueError("malformed attempt record")
-        return cls(failures=failures, locked_until=locked_until)
+        return cls(
+            failures=_count(payload, "failures"),
+            locked_until=locked_until,
+            locks=_count(payload, "locks"),
+        )
 
     def __str__(self) -> str:
         return self.encode()
@@ -89,17 +99,28 @@ class LockoutPolicy:
     """How many wrong codes an identifier may submit before it has to wait.
 
     The policy holds no state: the caller keeps an :class:`AttemptRecord` per
-    identifier and passes it back on every verification.
+    identifier and passes it back on every verification. With an ``escalation``
+    above 1 each lock on the same record lasts that much longer than the one
+    before it, never beyond ``max_duration``.
     """
 
     max_attempts: int = DEFAULT_MAX_ATTEMPTS
     duration: timedelta = DEFAULT_LOCKOUT
+    escalation: float = 1.0
+    max_duration: timedelta | None = None
 
     def __post_init__(self) -> None:
         if self.max_attempts < 1:
             raise ValueError("max_attempts must be at least 1")
         if self.duration <= ZERO:
             raise ValueError("duration must be positive")
+        if self.escalation < 1:
+            raise ValueError("escalation must be at least 1")
+        if self.max_duration is None:
+            if self.escalation > 1:
+                raise ValueError("an escalating lockout needs a max_duration")
+        elif self.max_duration < self.duration:
+            raise ValueError("max_duration must not be shorter than duration")
 
     def retry_after(
         self,
@@ -142,6 +163,19 @@ class LockoutPolicy:
             return 0
         return max(self.max_attempts - current.failures, 0)
 
+    def lock_duration(
+        self,
+        record: AttemptRecord | str | None = None,
+        now: datetime | None = None,
+    ) -> timedelta:
+        """How long the next lock on this record would last.
+
+        Also the lifetime the record itself needs: one that expires with its own
+        lock takes the locks it has served with it.
+        """
+        moment = _utcnow() if now is None else _require_aware(now, "now")
+        return self._span(self._current(record, moment).locks)
+
     def register_failure(
         self,
         record: AttemptRecord | str | None = None,
@@ -157,10 +191,12 @@ class LockoutPolicy:
         if current.locked_until is not None:
             return current
         failures = current.failures + 1
-        locked = failures >= self.max_attempts
+        if failures < self.max_attempts:
+            return AttemptRecord(failures=failures, locks=current.locks)
         return AttemptRecord(
             failures=failures,
-            locked_until=moment + self.duration if locked else None,
+            locked_until=moment + self._span(current.locks),
+            locks=current.locks + 1,
         )
 
     def register_success(self) -> AttemptRecord:
@@ -175,8 +211,25 @@ class LockoutPolicy:
         if isinstance(record, str):
             record = AttemptRecord.decode(record)
         if record.locked_until is not None and record.locked_until <= now:
-            return AttemptRecord()
+            return AttemptRecord(locks=record.locks)
         return record
+
+    def _span(self, locks: int) -> timedelta:
+        cap = self.max_duration
+        if cap is None or self.escalation == 1 or locks <= 0:
+            return self.duration
+        # Compared as logarithms: a stored record may carry any number of locks,
+        # and escalation ** locks overflows long before the cap stops mattering.
+        if locks * math.log(self.escalation) >= math.log(cap / self.duration):
+            return cap
+        return min(self.duration * self.escalation**locks, cap)
+
+
+def _count(payload: dict[str, object], key: str) -> int:
+    value = payload.get(key, 0)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError("malformed attempt record")
+    return value
 
 
 def _utcnow() -> datetime:

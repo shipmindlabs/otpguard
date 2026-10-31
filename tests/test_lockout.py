@@ -12,6 +12,19 @@ from otpguard import (
 
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 POLICY = LockoutPolicy(max_attempts=3, duration=timedelta(minutes=15))
+ESCALATING = LockoutPolicy(
+    max_attempts=3,
+    duration=timedelta(minutes=15),
+    escalation=2,
+    max_duration=timedelta(hours=1),
+)
+
+
+def spend_attempts(policy, record=None, now=NOW):
+    """Fail until the identifier is locked, and return the locked record."""
+    for _ in range(policy.max_attempts):
+        record = policy.register_failure(record, now)
+    return record
 
 
 def test_defaults():
@@ -20,6 +33,8 @@ def test_defaults():
     policy = LockoutPolicy()
     assert policy.max_attempts == DEFAULT_MAX_ATTEMPTS
     assert policy.duration == DEFAULT_LOCKOUT
+    assert policy.escalation == 1
+    assert policy.max_duration is None
 
 
 def test_an_unknown_identifier_may_try():
@@ -79,6 +94,55 @@ def test_success_clears_the_tally():
     assert POLICY.remaining_attempts(POLICY.register_success(), NOW) == 3
 
 
+def test_locks_are_counted_even_without_escalation():
+    record = spend_attempts(POLICY)
+    assert record.locks == 1
+    assert POLICY.lock_duration(record, NOW) == timedelta(minutes=15)
+
+    later = NOW + timedelta(minutes=15)
+    record = spend_attempts(POLICY, record, later)
+    assert record.locks == 2
+    assert record.locked_until == later + timedelta(minutes=15)
+
+
+def test_the_tally_restarts_but_the_strikes_do_not():
+    record = spend_attempts(ESCALATING)
+    expired = NOW + timedelta(minutes=15)
+    assert ESCALATING.allows(record, expired)
+    assert ESCALATING.remaining_attempts(record, expired) == 3
+    assert ESCALATING.register_failure(record, expired) == AttemptRecord(
+        failures=1, locks=1
+    )
+
+
+def test_each_lock_lasts_longer_than_the_one_before():
+    record = None
+    moment = NOW
+    for expected in (timedelta(minutes=15), timedelta(minutes=30), timedelta(hours=1)):
+        assert ESCALATING.lock_duration(record, moment) == expected
+        record = spend_attempts(ESCALATING, record, moment)
+        assert record.locked_until == moment + expected
+        moment = record.locked_until
+
+
+def test_escalation_stops_at_max_duration():
+    record = spend_attempts(ESCALATING, AttemptRecord(locks=9), NOW)
+    assert record.locks == 10
+    assert record.locked_until == NOW + timedelta(hours=1)
+
+
+def test_an_absurd_strike_count_still_yields_the_cap():
+    assert ESCALATING.lock_duration(AttemptRecord(locks=10**6), NOW) == timedelta(
+        hours=1
+    )
+
+
+def test_success_clears_the_strikes():
+    cleared = ESCALATING.register_success()
+    assert cleared == AttemptRecord()
+    assert ESCALATING.lock_duration(cleared, NOW) == timedelta(minutes=15)
+
+
 def test_a_lock_survives_a_restart():
     record = AttemptRecord(failures=3, locked_until=NOW + timedelta(minutes=15))
     stored = record.encode()
@@ -87,6 +151,19 @@ def test_a_lock_survives_a_restart():
     assert restored == record
     assert not POLICY.allows(restored, NOW)
     assert POLICY.retry_after(restored, NOW) == timedelta(minutes=15)
+
+
+def test_the_strikes_survive_a_restart():
+    stored = spend_attempts(ESCALATING).encode()
+    assert '"locks":1' in stored
+    assert AttemptRecord.decode(stored).locks == 1
+    assert ESCALATING.lock_duration(stored, NOW) == timedelta(minutes=30)
+
+
+def test_a_record_written_without_the_field_has_no_strikes():
+    assert AttemptRecord.decode('{"failures":2}') == AttemptRecord(failures=2)
+    assert AttemptRecord.decode("{}") == AttemptRecord()
+    assert ESCALATING.lock_duration('{"failures":2}', NOW) == timedelta(minutes=15)
 
 
 def test_an_encoded_record_is_accepted_directly():
@@ -115,6 +192,9 @@ def test_str_is_the_encoded_form():
         "nonsense",
         "[]",
         '{"failures":"two"}',
+        '{"failures":1,"locks":"two"}',
+        '{"failures":1,"locks":true}',
+        '{"failures":1,"locks":-1}',
         '{"failures":1,"locked_until":17}',
         '{"failures":1,"locked_until":"not-a-date"}',
         '{"failures":1,"locked_until":"2026-01-01T12:00:00"}',
@@ -125,9 +205,11 @@ def test_decode_rejects_a_malformed_record(encoded):
         AttemptRecord.decode(encoded)
 
 
-def test_negative_failures_are_rejected():
+def test_negative_counts_are_rejected():
     with pytest.raises(ValueError):
         AttemptRecord(failures=-1)
+    with pytest.raises(ValueError):
+        AttemptRecord(locks=-1)
 
 
 @pytest.mark.parametrize(
@@ -137,6 +219,9 @@ def test_negative_failures_are_rejected():
         {"max_attempts": -1},
         {"duration": timedelta(0)},
         {"duration": timedelta(seconds=-1)},
+        {"escalation": 0.5},
+        {"escalation": 2},
+        {"escalation": 2, "max_duration": timedelta(minutes=5)},
     ],
 )
 def test_invalid_policies_are_rejected(kwargs):
@@ -146,10 +231,13 @@ def test_invalid_policies_are_rejected(kwargs):
 
 def test_naive_datetimes_are_rejected():
     record = AttemptRecord(failures=3, locked_until=NOW)
+    naive = datetime(2026, 1, 1, 12, 0)
     with pytest.raises(ValueError):
-        AttemptRecord(failures=3, locked_until=datetime(2026, 1, 1, 12, 0))
+        AttemptRecord(failures=3, locked_until=naive)
     with pytest.raises(ValueError):
-        POLICY.retry_after(record, datetime(2026, 1, 1, 12, 0))
+        POLICY.retry_after(record, naive)
+    with pytest.raises(ValueError):
+        POLICY.lock_duration(record, naive)
 
 
 def test_now_defaults_to_the_current_time():
@@ -157,3 +245,4 @@ def test_now_defaults_to_the_current_time():
     past = datetime.now(timezone.utc) - timedelta(seconds=1)
     assert not POLICY.allows(AttemptRecord(failures=3, locked_until=soon))
     assert POLICY.allows(AttemptRecord(failures=3, locked_until=past))
+    assert ESCALATING.lock_duration() == timedelta(minutes=15)
