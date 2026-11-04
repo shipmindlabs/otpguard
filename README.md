@@ -116,6 +116,9 @@ The parts worth knowing about:
 - **Success spends the code atomically.** The spend claim is incremented before
   the digest is removed, so of several correct submissions arriving together
   exactly one is told it won.
+- **The tally outlives the lock it carries.** `fails:` is written with
+  `lock_duration(record)` plus `code_ttl`, so a record that expired with its own
+  lock cannot take the locks it counted with it.
 - **The code stays out of logs.** `RequestedCode.__repr__` masks it, as
   `Message` and `TestMode` do.
 
@@ -217,6 +220,30 @@ The encoded record is ASCII JSON and fits in a single column. Once the lock
 expires the tally starts over, and attempts made while the identifier is locked
 leave the record untouched, so hammering the endpoint cannot stretch the wait.
 Methods accept either an `AttemptRecord` or its encoded form.
+
+The restart is for the failures alone. The record also counts the locks it has
+served, so a policy with an `escalation` factor can make each lock on the same
+record last longer than the one before it. The factor requires a `max_duration`,
+because a wait that keeps doubling with no ceiling is an account closed for good.
+
+```python
+lockout = LockoutPolicy(
+    max_attempts=5,
+    duration=timedelta(minutes=15),
+    escalation=2,
+    max_duration=timedelta(hours=4),
+)
+
+lockout.lock_duration(stored_record)   # 15 min, then 30, then 60... up to 4 h
+record.locks                           # locks served so far
+```
+
+The default `escalation=1` keeps every lock the same length, a record written
+before the field existed decodes as zero locks, and `register_success()` clears
+the strikes with the failures: the escalation answers a run of lockouts, not an
+account that eventually got in. Give the stored record a lifetime of at least
+`lock_duration(record)` plus the lifetime of the code — a record that expires
+with its own lock takes the strikes with it.
 
 ### Storage
 
@@ -376,6 +403,11 @@ pieces together yourself:
 - **Attempts while locked stay locked.** `register_failure` returns a locked
   record unchanged, so repeated tries neither extend nor shorten the wait.
 
+A patient attacker waits out each lock and spends the next set of attempts, which
+is what `escalation` is for: the failures restart but the strikes do not, so the
+wait grows with every lock the identifier has served, up to `max_duration`. Keep
+the record alive at least that long, or expiry becomes the reset.
+
 Lockout is per identifier. An attacker spreading one guess over many identifiers
 is a different shape of attack, and the counter for it is a cap keyed by source
 rather than by identifier — `store.incr(f"ip:{address}", timedelta(hours=1))` is
@@ -451,7 +483,11 @@ default.
 | --- | --- | --- |
 | `ResendCooldown.interval` | `DEFAULT_COOLDOWN` (60s) | Minimum delay between two deliveries to one identifier |
 | `LockoutPolicy.max_attempts` | `DEFAULT_MAX_ATTEMPTS` (5) | Wrong codes allowed before the identifier is locked |
-| `LockoutPolicy.duration` | `DEFAULT_LOCKOUT` (15 min) | How long a locked identifier waits |
+| `LockoutPolicy.duration` | `DEFAULT_LOCKOUT` (15 min) | How long the first lock on a record lasts |
+| `LockoutPolicy.escalation` | `1.0` | Factor every further lock on the same record multiplies by |
+| `LockoutPolicy.max_duration` | `None` | Ceiling on an escalating lock; required above `1.0` |
+| `LockoutPolicy.lock_duration()` | — | How long the next lock would last, and the lifetime the record needs |
+| `AttemptRecord.locks` | `0` | Locks the record has served; absent from an older encoded record |
 
 Both take an optional `now` on every method for testing, and require
 timezone-aware datetimes.
