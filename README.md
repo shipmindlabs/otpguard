@@ -443,6 +443,60 @@ does not hand it out, and nothing in the library logs a code or a universal code
 Keep your own logging to the same rule, and if you use a pepper, keep it out of
 the database whose leak it is meant to survive.
 
+## Responses at the endpoint
+
+The library raises; the status code is yours. This is the mapping to copy, and
+the reason it looks the way it does is the section above: every row is reached
+identically for an identifier you know and one you have never seen, so the
+response carries no answer to "does this account exist".
+
+| Raised | Where | Status | `Retry-After` | Log | Body may say |
+| --- | --- | --- | --- | --- | --- |
+| `ResendTooSoon` | `flow.request` | `429` | `ceil(exc.retry_after_seconds)` | INFO | "If that number is registered, a code is on its way." |
+| `LockedOut` | `flow.verify` | `429` | `ceil(exc.retry_after_seconds)` | WARNING | "Too many attempts. Try again later." |
+| `DeliveryError` | `flow.request`, from the channel | whatever a success gets (`202`) | whatever a success gets | ERROR | whatever a success says |
+| `StubSenderInProduction` | `require_real_sender`, at wiring | `500` | — | CRITICAL | "Something went wrong." |
+| `TestModeInProduction` | `require_no_test_mode`, `TestMode.from_env` | `500` | — | CRITICAL | "Something went wrong." |
+| `ValueError` | decoding stored state | `500` | — | ERROR | "Something went wrong." |
+
+Most traffic raises nothing at all, and those answers belong in the same table:
+
+| Outcome | Status | `Retry-After` | Log | Body may say |
+| --- | --- | --- | --- | --- |
+| `flow.request` returns | `202` | `ceil` of the wait to `resend_allowed_at` | INFO | "If that number is registered, a code is on its way." |
+| `flow.verify` returns `True` | `200` | — | INFO | the session or token |
+| `flow.verify` returns `False` | `401` | — | INFO | "That code is not valid." |
+
+What the table is doing:
+
+- **One body per status, built from the status alone.** Never from `str(exc)`:
+  the messages name waits to one decimal place, and `TestModeInProduction` names
+  environment variables. They are written for your logs.
+- **Round `Retry-After` up.** The header is integer seconds; truncating 43.6 to
+  43 invites a retry that is still inside the window. Both exceptions carry
+  `retry_after` as a `timedelta` and `retry_after_seconds` as a float.
+- **Send `Retry-After` on the success too.** A `429` that carries the header and
+  a `202` that does not is a two-state oracle on its own.
+- **The request endpoint has to run the cooldown for an unknown identifier.**
+  Otherwise the second request within the minute gets `202` for a stranger and
+  `429` for a user, and the presence of a wait is the answer.
+- **Verification is uniform already.** An unknown identifier has no pending
+  digest, `flow.verify` charges that to the tally like any wrong code, so it
+  walks the same `401`s and reaches the same `429`.
+- **`DeliveryError` is the row that tempts you.** A gateway refusing an address
+  is information about the address, so the client gets the success response
+  unchanged. The price is that an outage then looks like success from outside,
+  which is why it is the one expected exception logged at ERROR: alert on the
+  rate, do not forward the distinction.
+- **Malformed stored state is a fault, not a wrong code.** A `ValueError` out of
+  `AttemptRecord.decode`, `HashedCode.decode` or `Storage.incr` means the state
+  is not what this library wrote. Answer `500` and grant nothing — and do not
+  "recover" by deleting the key, because dropping `fails:` is exactly the
+  attempt-counter reset an attacker who can write junk into it is after.
+- **The two production guards should never reach a handler.** Both belong where
+  the application wires itself together, so they refuse to boot rather than
+  serve. The `500` row is only what to do if you construct the flow per request.
+
 ## Configuration reference
 
 No global configuration and no settings file: everything is an argument with a
