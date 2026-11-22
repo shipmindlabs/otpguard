@@ -31,6 +31,7 @@ from otpguard.lockout import (
     LockedOut,
     LockoutPolicy,
 )
+from otpguard.quota import DEFAULT_SCOPE, Quota, QuotaExceeded
 from otpguard.storage import (
     DEFAULT_PREFIX,
     MemoryStorage,
@@ -55,6 +56,7 @@ __all__ = [
     "DEFAULT_MAX_ATTEMPTS",
     "DEFAULT_POLICY",
     "DEFAULT_PREFIX",
+    "DEFAULT_SCOPE",
     "DEFAULT_SEPARATORS",
     "DEFAULT_TEMPLATE",
     "DIGITS",
@@ -74,6 +76,8 @@ __all__ = [
     "MemoryStorage",
     "Message",
     "OtpFlow",
+    "Quota",
+    "QuotaExceeded",
     "RedisStorage",
     "RequestedCode",
     "ResendCooldown",

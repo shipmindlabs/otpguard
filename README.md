@@ -5,9 +5,10 @@ lockout and pluggable delivery channels.
 
 A one-time code is easy to generate and easy to get wrong. otpguard carries the
 parts that are usually left to the application: a code drawn from the system
-CSPRNG and stored only as a salted digest, a resend cooldown, an attempt tally
-that survives a restart, a delivery contract, a test mode that cannot be left
-switched on quietly, and a flow object that holds them together.
+CSPRNG and stored only as a salted digest, a resend cooldown with an absolute
+cap above it, an attempt tally that survives a restart, a delivery contract, a
+test mode that cannot be left switched on quietly, and a flow object that holds
+them together.
 
 ## Status
 
@@ -188,6 +189,51 @@ except ResendTooSoon as exc:
 `retry_after()` returns the same remaining time without raising, `allows()`
 answers with a bool, and `next_allowed_at()` gives the absolute moment the next
 code may go out. Timestamps must be timezone-aware; any offset works.
+
+### Quotas
+
+The cooldown is a floor, not a ceiling: sixty seconds between codes still allows
+1440 of them a day, and every one costs money. `Quota` is the ceiling — how many
+times one subject may spend something inside one window, counted in the same
+`Storage` as everything else.
+
+```python
+from datetime import timedelta
+from otpguard import MemoryStorage, Quota, QuotaExceeded
+
+store = MemoryStorage()
+daily = Quota(limit=10, window=timedelta(days=1), scope="sends:day")
+
+try:
+    daily.claim(store, identifier)      # 1, then 2, then 3...
+except QuotaExceeded as exc:
+    exc.retry_after_seconds             # 86400.0
+else:
+    flow.request(identifier, destination)
+
+daily.used(store, identifier)           # 3
+daily.remaining(store, identifier)      # 7
+daily.allows(store, identifier)         # True while there is room
+```
+
+The subject is whatever is worth capping, and that is the point: an identifier
+for a daily send cap, a country code or number prefix to catch a flood spread
+over fresh identifiers, the address a request came from to catch one guess spread
+over many accounts. Each `scope` is a namespace of its own in the store, so
+several quotas can watch the same subject.
+
+The parts worth knowing about:
+
+- **The claim is the count.** `claim` increments first and refuses afterwards, so
+  two requests arriving together cannot both find room for the last send.
+- **A refused claim still counts.** The lifetime is attached when the counter is
+  created, so the window belongs to the first claim and hammering a spent quota
+  cannot push the reset out.
+- **`check` spends nothing.** Use it to answer "would this be allowed", and
+  `claim` where the decision is actually made.
+- **The wait is the whole window.** How much of a counter's lifetime is left is
+  not part of the `Storage` contract, so `retry_after` overstates the wait rather
+  than inviting a retry that is still refused.
 
 ### Attempt counting and lockout
 
@@ -409,9 +455,10 @@ wait grows with every lock the identifier has served, up to `max_duration`. Keep
 the record alive at least that long, or expiry becomes the reset.
 
 Lockout is per identifier. An attacker spreading one guess over many identifiers
-is a different shape of attack, and the counter for it is a cap keyed by source
-rather than by identifier — `store.incr(f"ip:{address}", timedelta(hours=1))` is
-enough to build one.
+is a different shape of attack, and the counter for it is a `Quota` keyed by
+source rather than by identifier:
+`Quota(limit=20, window=timedelta(hours=1), scope="guesses").claim(store, address)`
+in front of `flow.verify` caps the whole spread.
 
 ### SMS cost and pumping
 
@@ -420,15 +467,15 @@ number it is given is an endpoint someone can bill you for. Traffic pumping loop
 it against ranges that pay the attacker a share of the fee.
 
 - **The cooldown is a floor, not a cap.** Sixty seconds still allows 1440
-  messages per identifier per day. Add an absolute cap:
-  `store.incr(f"sent:day:{identifier}", timedelta(days=1))` and refuse above a
-  threshold you are willing to pay for.
+  messages per identifier per day. Put a `Quota` above it:
+  `Quota(limit=10, window=timedelta(days=1), scope="sends:day")` refuses the
+  eleventh code of the day, so the bill has a ceiling you chose.
 - **Check before you send.** The cooldown gate is claimed ahead of `sender.send`,
   so a refused request costs nothing. Generating the code first is free; sending
   it is not.
-- **Cap by destination, not only by identifier.** Counters keyed by country code
-  or number prefix catch a flood spread over fresh identifiers, which a
-  per-identifier cooldown never sees.
+- **Cap by destination, not only by identifier.** A `Quota` whose subject is the
+  country code or number prefix catches a flood spread over fresh identifiers,
+  which a per-identifier cooldown never sees.
 - **Prefer the cheaper channel when you can.** `Sender` is one method, so email
   or push can serve the same flow at a fraction of the cost.
 - **Watch the stub.** `StubSender` logs every message at WARNING and
@@ -453,6 +500,7 @@ response carries no answer to "does this account exist".
 | Raised | Where | Status | `Retry-After` | Log | Body may say |
 | --- | --- | --- | --- | --- | --- |
 | `ResendTooSoon` | `flow.request` | `429` | `ceil(exc.retry_after_seconds)` | INFO | "If that number is registered, a code is on its way." |
+| `QuotaExceeded` | wherever you claim a `Quota` | `429` | `ceil(exc.retry_after_seconds)` | WARNING | whatever a success at that endpoint says |
 | `LockedOut` | `flow.verify` | `429` | `ceil(exc.retry_after_seconds)` | WARNING | "Too many attempts. Try again later." |
 | `DeliveryError` | `flow.request`, from the channel | whatever a success gets (`202`) | whatever a success gets | ERROR | whatever a success says |
 | `StubSenderInProduction` | `require_real_sender`, at wiring | `500` | — | CRITICAL | "Something went wrong." |
@@ -477,6 +525,9 @@ What the table is doing:
   `retry_after` as a `timedelta` and `retry_after_seconds` as a float.
 - **Send `Retry-After` on the success too.** A `429` that carries the header and
   a `202` that does not is a two-state oracle on its own.
+- **A quota answers like the endpoint it guards.** A cap on sends is about your
+  bill, not about the account, so the client gets the ordinary request response
+  and the `429` is for your logs and your alerts.
 - **The request endpoint has to run the cooldown for an unknown identifier.**
   Otherwise the second request within the minute gets `202` for a stranger and
   `429` for a user, and the presence of a wait is the answer.
@@ -545,6 +596,18 @@ default.
 
 Both take an optional `now` on every method for testing, and require
 timezone-aware datetimes.
+
+### Quotas
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `Quota.limit` | required | Claims allowed inside one window; at least 1 |
+| `Quota.window` | required | Lifetime of the counter, anchored to the first claim |
+| `Quota.scope` | `DEFAULT_SCOPE` (`"sends"`) | Namespace of the key, `<scope>:<subject>` |
+| `Quota.claim(store, subject)` | — | Counts one use, raising `QuotaExceeded` past the cap |
+| `Quota.check(store, subject)` | — | Raises without spending anything |
+| `Quota.used()` / `.remaining()` / `.allows()` | — | Read the counter for a subject |
+| `Quota.key(subject)` | — | The key the count lives under; pick a scope of your own |
 
 ### Storage
 
